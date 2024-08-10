@@ -26,6 +26,7 @@ import keras.backend as K
 import zipfile
 import random
 import evalu
+from nd_mlp_mixer import MLPMM
 # import time
 # gpus = tf.config.experimental.list_physical_devices('GPU')
 # tf.config.experimental.set_memory_growth(gpus[0], True)
@@ -35,7 +36,7 @@ import evalu
 def getimg(dir,num,j):
     input_dir = dir
     img_list = []
-    for i in range(1+j,num+j):
+    for i in range(1+j,num+1+j):
         filename = f'{i}.tif'
         img_path = os.path.join(input_dir,filename)
         img = imageio.imread(img_path)
@@ -97,10 +98,10 @@ def Conv_Block(input_tensor, filters, bottleneck=False, weight_decay=1e-4):
     :param weight_decay: 权重衰减率
     :return:
     """
-    concat_axis = 1 if K.image_data_format() == 'channel_first' else -1  # 确定格式
+    # concat_axis = 1 if K.image_data_format() == 'channel_first' else -1  # 确定格式
 
-    x = BatchNormalization(axis=concat_axis, epsilon=1.1e-5)(input_tensor)
-    x = Activation('relu')(x)
+    x = BatchNormalization(axis=-1, epsilon=1.1e-5)(input_tensor)
+    x = Activation('relu')(input_tensor)
 
     # if bottleneck:
     #     # 使用bottleneck进行降维
@@ -112,10 +113,16 @@ def Conv_Block(input_tensor, filters, bottleneck=False, weight_decay=1e-4):
     #     x = BatchNormalization(axis=concat_axis, epsilon=1.1e-5)(x)
     #     x = Activation('relu')(x)
 
-    x = Conv2D(filters, (3, 3), kernel_initializer='he_normal', padding='same', use_bias=False)(x)
+    x = Conv2D(filters, (3, 3), kernel_initializer='he_normal', padding='same', use_bias=True)(x)
+    # x = Conv2D(filters, (3, 3), kernel_initializer='he_normal', use_bias=True)(x)
 
     return x
 
+# 定义一个函数来添加随机通道
+def add_random_channel(inputs):
+    batch_size, height, width = tf.shape(inputs)[0], tf.shape(inputs)[1], tf.shape(inputs)[2]
+    random_channel = tf.random.uniform(shape=(batch_size, height, width, 1), minval=0, maxval=1)
+    return tf.concat([inputs, random_channel], axis=-1)
 
 def dens_block(input_tensor, nb_filter):
     x1 = Conv_Block(input_tensor, nb_filter)
@@ -125,17 +132,25 @@ def dens_block(input_tensor, nb_filter):
     x3 = Conv_Block(add2, nb_filter)
     return x3
 
-# model definition
+def MMM(input_shape=(128,128,2)):
+    inputs = Input(input_shape)
+    arc = add_random_channel(inputs)
+    x = MLPMM(num_blocks=10, patch_size=16, tokens_mlp_dim=128, channels_mlp_dim=1024)(arc)
+    model = Model(inputs=inputs,outputs=x)
+    print(model.summary())
+    return model
+
 def unet(input_shape=(128, 128, 2)):
     # tf.keras.mixed_precision.set_global_policy('mixed_float16')
     inputs = Input(input_shape)
+    arc = add_random_channel(inputs)
     # input1=Input(shape=(128,128,1))
     # input2=Input(shape=(128,128,1))
     # inputs=Concatenate(axis=-1)([input1,input2])
     # inputs = Input(shape
     # x  = Conv2D(32, 1, strides=1, activation='relu', padding='same', kernel_initializer='he_normal')(inputs)
-    x = Conv2D(32, 7, kernel_initializer='he_normal', padding='same', strides=1, use_bias=False,
-               kernel_regularizer=l2(1e-4))(inputs)
+    x = Conv2D(32, 7, kernel_initializer='he_normal', padding='same', strides=1, use_bias=True,
+               kernel_regularizer=l2(0))(arc)
     # down first
     down1 = dens_block(x, nb_filter=64)
     pool1 = MaxPooling2D(pool_size=(2, 2))(down1)  # 256
@@ -174,10 +189,10 @@ def unet(input_shape=(128, 128, 2)):
     up9 = dens_block(add9, nb_filter=64)
     # output
     conv10 = Conv2D(32, 7, strides=1, activation='relu', padding='same', kernel_initializer='he_normal')(up9)
-    conv10 = Conv2D(2, 1, activation='softmax')(conv10)
+    conv10 = Conv2D(2, 1, activation='softmax',use_bias=False)(conv10)
     # model = Model(inputs=[input1,input2], outputs=conv10)
     model = Model(inputs=inputs, outputs=conv10)
-    # print(model.summary())
+    print(model.summary())
     return model
 
 
@@ -204,7 +219,7 @@ def dice_coef_loss(y_true, y_pred):
 
 lr_schedule = tf.keras.optimizers.schedules.InverseTimeDecay(
   0.001,
-  decay_steps=80,
+  decay_steps=10,
   decay_rate=1,
   staircase=False)
 
@@ -239,9 +254,9 @@ def train(model, model_savename, train_dataset, validation_dataset,reduce_lr):
     # reduce_lr = LearningRateScheduler(lschedule)
     # model.load_weights('/code/save_model/exped/'+model_savename)
     model_checkpoint = ModelCheckpoint('G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/save_model/exped/'+model_savename,save_weights_only=True, monitor='loss', verbose=1,
-                                       save_best_only=True, initial_value_threshold=0.005)
-    early_stop = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=200)
-    Board = tf.keras.callbacks.TensorBoard(log_dir="G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/output/logs",histogram_freq=100)
+                                       save_best_only=True, initial_value_threshold=0.002)
+    early_stop = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=100)
+    Board = tf.keras.callbacks.TensorBoard(log_dir="G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/output/logs_mlpmixer",histogram_freq=100)
     
     history = model.fit(train_dataset,
                                   steps_per_epoch=100,
@@ -265,26 +280,28 @@ def test(model, test_dataset, output_path, length):
         cv2.imwrite(output_path+ '%d.tif' %(j+1), mask[j])
     print('model predict OK')
         
-BATCH_SIZE=64
+BATCH_SIZE=4
 plot_path = '/code/loss_picture/extended/'
 
 if __name__ == '__main__':
+    NUM_train = 3900
+    NUM_tv = 200
     output_path = 'G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/data_2D/v2/exped_output/'
     label_path = 'G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/data_2D/v2/label/label/'
     img_path = 'G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/data_2D/v2/data1/data/'
-    img1_list = getimg(img_path,num=2901, j=0)
+    img1_list = getimg(img_path,num=NUM_train, j=0)
     img_path = 'G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/data_2D/v2/data2/data/'
-    img2_list = getimg(img_path,num=2901, j=900)
-    label_list = getimg(label_path,num=2901, j=0)
+    img2_list = getimg(img_path,num=NUM_train, j=900)
+    label_list = getimg(label_path,num=NUM_train, j=0)
     img_list = np.stack((img1_list,img2_list),axis = -1)
     
     img_path2 = 'G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/data_2D/v2/test/predicted_input_data/'
     label_path2 = 'G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/data_2D/v2/test/predicted_label/'
     # output_path = 'G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/data_2D/v2/test/outputv2/'
-    img1_list = getimg(img_path2,num=101, j =0)
-    img2_list = getimg(img_path2,num=101, j =100)
+    img1_list = getimg(img_path2,num=100, j =0)
+    img2_list = getimg(img_path2,num=100, j =100)
     test_img_list = np.stack((img1_list,img2_list),axis = -1)
-    test_label_list = getimg(label_path2, num=101, j=0)
+    test_label_list = getimg(label_path2, num=100, j=0)
     
     img_list = np.vstack((img_list, test_img_list))
     label_list = np.vstack((label_list, test_label_list))
@@ -311,28 +328,30 @@ if __name__ == '__main__':
     test_path = 'G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/data_2D/v2/test/test2/data/'
     test_label_path = 'G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/data_2D/v2/test/test2/label/'
     test_output_path = 'G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/data_2D/v2/test/outputv2/'
-    img1_list = getimg(test_path,num=201, j =0)
-    img2_list = getimg(test_path,num=201, j =200)
+    img1_list = getimg(test_path,num=NUM_tv, j =0)
+    img2_list = getimg(test_path,num=NUM_tv, j =200)
     img_list = np.stack((img1_list,img2_list),axis = -1)
-    label_list = getimg(test_label_path,num=201,j=0)
+    label_list = getimg(test_label_path,num=NUM_tv,j=0)
     tv_imgset = tf.data.Dataset.from_tensor_slices(img_list)
     tv_labelset = tf.data.Dataset.from_tensor_slices(label_list)
     tv_labelset = tv_labelset.map(onehot)
     tv_set = tf.data.Dataset.zip((tv_imgset, tv_labelset))
-    validation_dataset = tv_set.take(100).batch(BATCH_SIZE).cache().prefetch(tf.data.AUTOTUNE)
+    validation_dataset = tv_set.batch(BATCH_SIZE).cache().prefetch(tf.data.AUTOTUNE)
 
     
     # mirrored_strategy = tf.distribute.MirroredStrategy()
     # with mirrored_strategy.scope():
-    model = unet(input_shape=(128, 128, 2))
+    # model = unet(input_shape=(128, 128, 2))
+    model = MMM()
+    # model = NdAutoencoder(in_shape=(128,128,2),repr_shape=(16,16),num_mix_layers=10,hidden_size=256)
     model.compile(optimizer=optimizer.Adam(learning_rate=0.001), loss=tf.keras.losses.CategoricalCrossentropy(), metrics=['accuracy'])
     reduce_lr = LearningRateScheduler(scheduler)
         # model.load_weights('/code/save_model/exped/cross_ini_277.keras')
-    model_savename = '8_5test.keras'
+    model_savename = '8_10_3900dunetbase.keras'
     train = train(model, model_savename, train_dataset, validation_dataset,reduce_lr)
     
     image_dataset = image_dataset.batch(BATCH_SIZE)
-    test(model, image_dataset, output_path, 3000)
+    test(model, image_dataset, output_path, NUM_train+100)
     # name = 'error2' + '_postCrV' + '.csv'
     error_path = '../errors/'
     name = 'error_expedv2' + '.csv'
@@ -343,8 +362,10 @@ if __name__ == '__main__':
 
     # test_dataset = tf.data.Dataset.from_tensor_slices(img_list)
     test_dataset = tv_imgset.batch(1)
-    model.load_weights('G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/save_model/exped/'+model_savename)
-    test(model, test_dataset, test_output_path,200)
+    try:
+        model.load_weights('G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/save_model/exped/'+model_savename)
+    except: pass
+    test(model, test_dataset, test_output_path,NUM_tv)
     name = 'error_exped_testv2.csv'
     name = os.path.join(error_path, name)
     evalu.main(output_dir=test_output_path, label_dir=test_label_path, name=name, oder=np.array(0))
