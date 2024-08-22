@@ -127,7 +127,8 @@ class MLPm(nn.Module):
                 PreNormResidual(dim, FeedForward(dim, expansion_factor, dropout, nn.Linear))
             ) for _ in range(depth)
         ])
-        self.norm = nn.LayerNorm(dim)
+        # self.norm = nn.LayerNorm(dim)
+        self.norm = nn.LayerNorm([image_size,image_size])
         self.brearrange = Rearrange(' b c (h w)  -> b c h w ',h = brear)
         # self.linear_out = nn.Linear(dim, upchannels)
         # self.expand_dim = ExpanDim(upchannels)
@@ -142,12 +143,13 @@ class MLPm(nn.Module):
         x = self.rearrange(x)
         x = self.linear(x)
         x = self.blocks(x)
-        x = self.norm(x)
+        # x = self.norm(x)
         # x = self.linear_out(x)
         # x = self.expand_dim(x)
         x = self.brearrange(x)
         x = self.upsample(x)
         x = self.conv_conca(x)
+        x = self.norm(x)
         x = self.conv_out(x)
         return x
         # return nn.Sequential(
@@ -186,15 +188,21 @@ def cosine_warmup_lambda(current_step, num_warmup_steps):
 
 def train(train_tensor, vali_tensor, model, loss_f, optimizer, epoches, save_path, logdir, device):
     # size = len(train_tensor.dataset)
-    pre_total_loss = 30
+    pre_mvloss = 0.1
     pre_epoch = 0
+    num_wmp_steps = 800
+    warmrestart = False
+    decay_factor = 0.8  # 每次重启时减少的因子
+    initial_lr = 0.001
+    optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr)
     model.train()
     writer_train = SummaryWriter(log_dir=os.path.join(logdir,'train'))
     writer_vali = SummaryWriter(log_dir=os.path.join(logdir,'vali'))
     train_iou = JaccardIndex(num_classes=2, task="binary").to(device)
     val_iou = JaccardIndex(num_classes=2, task="binary").to(device)
-    scheduler_rlr = lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
-    scheduler_wmu = lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda step: cosine_warmup_lambda(step, num_warmup_steps=200))
+    # scheduler_rlr = lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=1, verbose=True) #5个epoch验证一次loss没少就减少还是不太行，可以试试factor0.1以下
+    scheduler_wmu = lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda step: cosine_warmup_lambda(step, num_warmup_steps=num_wmp_steps))
+    scheduler_cosrest = lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=0.0000001)
 
     for epoch in range(epoches):
         for batch_index, (data, target) in enumerate(train_tensor):
@@ -207,24 +215,34 @@ def train(train_tensor, vali_tensor, model, loss_f, optimizer, epoches, save_pat
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            scheduler_wmu.step()
+            if epoch * len(train_tensor) + batch_index < num_wmp_steps:
+                scheduler_wmu.step()
+            else: warmrestart = True
             predictions = torch.argmax(pred, dim=1)
             iou_value = train_iou(predictions, target).item()
             # 获取学习率
-            lr_1 = scheduler_rlr.get_last_lr()[0]
-            lr_2 = scheduler_wmu.get_last_lr()[0]
+            # lr_1 = scheduler_rlr.get_last_lr()[0]
+            # lr_2 = scheduler_wmu.get_last_lr()[0]
             lr_3 = optimizer.param_groups[0]['lr']
 
-            print('Train Epoch: {} [{}/{} ({:.0f}%)] \tLoss: {:.12f} \tIoU: {:.5f} \tlearning rate: {:.4f} \tlr_2: {:.4f} \tlr_opt: {:.4f}'.format(
+            print('Train Epoch: {} [{}/{} ({:.0f}%)] \tLoss: {:.12f} \tIoU: {:.5f} \tlearning rate: {:.6f}'.format(
                 epoch, batch_index * len(data), len(train_tensor.dataset),
-                       100. * batch_index / len(train_tensor), loss.item(), iou_value, lr_1,lr_2,lr_3))
+                       100. * batch_index / len(train_tensor), loss.item(), iou_value, lr_3))
             # if batch_index % 100 == 0:
             #     loss, current = loss.item(), (batch_index + 1) * len(data)
             #     print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
-
+        if warmrestart: 
+            if scheduler_cosrest.T_cur == scheduler_cosrest.T_i - 1:
+            # 减小初始学习率
+                initial_lr *= decay_factor
+                
+                # 更新调度器的 base_lrs
+                scheduler_cosrest.base_lrs = [initial_lr for _ in scheduler_cosrest.base_lrs]
+            scheduler_cosrest.step()
         train_iou_value = train_iou.compute()
         print(f"Train Epoch: {epoch} - Jaccard Index (IoU): {train_iou_value:.4f}")
         writer_train.add_scalar('Training IoU', train_iou_value, epoch)
+        writer_train.add_scalar('Learning Rate', lr_3, epoch)
         # writer.add_scalar('CrossEntropyLoss_lastbatch', loss.item(), epoch)
 
         # fig = train_iou.plot()
@@ -254,18 +272,20 @@ def train(train_tensor, vali_tensor, model, loss_f, optimizer, epoches, save_pat
                        100. * batch_index / len(vali_tensor), v_loss.item(), iou_value))
 
                 val_iou_value = val_iou.compute()
-                
-                print(f"Validation - Epoch: {epoch} - t_Loss: {total:.4f}, IoU: {val_iou_value:.4f}")
+                mvloss = total / len(vali_tensor.dataset)
+                # scheduler_rlr.step(mvloss)
+                print(f"Validation - Epoch: {epoch} - mean_vali_Loss: {mvloss:.12f}, IoU: {val_iou_value:.5f}")
                 writer_vali.add_scalar('validation IoU', val_iou_value, epoch)
+                writer_vali.add_scalar('Validation CELoss', mvloss, epoch)
 
                 # pr curves:
                 all_preds = torch.cat(all_preds)
                 # writer_vali.add_pr_curve(f'PR_curve_epoch_{epoch}', tv_label, all_preds, global_step=epoch)
                 writer_vali.add_pr_curve(f'PR_curve', tv_label, all_preds, global_step=epoch)
-                scheduler_rlr.step(total)
-                if total <= pre_total_loss:
-                    print(f"now loss :{v_loss:>7f} better than previous best epoch{pre_epoch:>3d}:{pre_total_loss:>7f} ")
-                    model_name = f'MLPMwup_epoch{epoch:03d}-valoss{v_loss:.3f}.pth'
+                
+                if mvloss <= pre_mvloss:
+                    print(f"now loss :{mvloss:>7f} better than previous best epoch{pre_epoch:>3d}:{pre_mvloss:>7f} ")
+                    model_name = f'MLPMrestart_epoch{epoch:03d}-valoss{mvloss:.3f}.pth'
                     # torch.save(model, os.path.join(save_path, model_name))
                     torch.save({
                             'epoch': epoch,
@@ -273,7 +293,7 @@ def train(train_tensor, vali_tensor, model, loss_f, optimizer, epoches, save_pat
                             'optimizer_state_dict': optimizer.state_dict(),
                             'loss': loss,
                         }, os.path.join(save_path, model_name))
-                    pre_total_loss = total
+                    pre_mvloss = mvloss
                     pre_epoch = epoch
             
     torch.save(model, os.path.join(save_path, 'MLPM_final_epoch.pth'))
@@ -335,7 +355,7 @@ if __name__ == '__main__':
     path = 'G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/save_model/torch/MLPM_epoch030-valoss0.025.pth'
     # model = torch.load(path)
     loss_fn = nn.CrossEntropyLoss() #(weight=we_loss)
-    optimizer = torch.optim.Adam(model.parameters())
+    # optimizer = torch.optim.Adam(model.parameters())
     # total_params = 0
     
     # checkpoint = torch.load(path)
