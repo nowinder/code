@@ -157,7 +157,7 @@ class S2Block(nn.Module):
         self.model = nn.Sequential(
             *[nn.Sequential(
                 PreNormResidual(d_model, S2Attention(d_model)),
-                PreNormResidual(d_model, ConvFFN(in_channels=d_model,hidden_channels=d_model*expansion_factor,ks=3,drop=dropout))
+                ConvFFN(in_channels=d_model,hidden_channels=d_model*expansion_factor,ks=3,drop=dropout)
             ) for _ in range(depth)]
         )
 
@@ -346,6 +346,8 @@ class S2MLPv2(nn.Module):
             ) for _ in range(ups)]
         )
         self.emb2dep = nn.Conv2d(in_channels=d_model[-1],out_channels=24, kernel_size=1, bias=True)
+        # self.emb2dep1 = nn.Conv2d(in_channels=d_model[-1],out_channels=2, kernel_size=5, bias=True)
+        # self.out = ConvFFN(2,2*4,ks=3,drop=drop,change_chan=False)
         self.out = nn.Conv3d(in_channels=1, out_channels=2, kernel_size=5, bias=False)
         # self.upsample2 = nn.Upsample(scale_factor=2, mode='bicubic', align_corners=True)
         # self.conv_out = nn.Conv2d(in_channels=d_model[-1]+sum(filters_num), out_channels=2, kernel_size=1, bias=False, padding='valid')
@@ -365,6 +367,20 @@ class S2MLPv2(nn.Module):
         # out = self.conv_out(convc)
         # out = self.conv_out(self.upsample1(embedding))
         return out
+    # def forward(self, x):
+    #     # x = self.random_concat_layer(x)
+    #     embedding = self.stages(x)
+    #     # convc = self.conv_conca(self.upsample1(embedding))
+    #     # convc = self.upconv(embedding)
+    #     convc = self.upcfn(embedding)
+    #     dep = self.emb2dep1(convc)
+    #     out = self.out(dep)
+    #     # dep = dep.unsqueeze(1)
+    #     # out = self.out(dep)
+    #     # out = self.mlp_head(embedding)
+    #     # out = self.conv_out(convc)
+    #     # out = self.conv_out(self.upsample1(embedding))
+    #     return out
 
 
 # model2 = S2MLPv2(in_channels=20,patch_size=[4],expansion_factor=[3],d_model=[192],depth=[4]) 
