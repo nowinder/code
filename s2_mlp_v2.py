@@ -127,13 +127,13 @@ class ConvFFN(nn.Module):
         self.fc2 = nn.Conv2d(hidden_channels, out_channels, kernel_size=1)
         self.drop = nn.Dropout(drop)
         self.chac = change_chan
-        self.apply(self._init_weights)
+        # self.apply(self._init_weights)
 
-    def _init_weights(self, m: nn.Module) -> None:
-        if isinstance(m, nn.Conv2d):
-            trunc_normal_(m.weight, std=0.02)
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
+    # def _init_weights(self, m: nn.Module) -> None:
+    #     if isinstance(m, nn.Conv2d):
+    #         trunc_normal_(m.weight, std=0.02)
+    #         if m.bias is not None:
+    #             nn.init.constant_(m.bias, 0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.chac: x = x.permute(0,3,1,2)
@@ -157,7 +157,9 @@ class S2Block(nn.Module):
         self.model = nn.Sequential(
             *[nn.Sequential(
                 PreNormResidual(d_model, S2Attention(d_model)),
-                ConvFFN(in_channels=d_model,hidden_channels=d_model*expansion_factor,ks=3,drop=dropout)
+                # 这里还是要加上prenorm层，不然老是梯度消失，梯度爆炸
+                PreNormResidual(d_model,ConvFFN(in_channels=d_model,hidden_channels=d_model*expansion_factor,ks=3,drop=dropout))
+                # ConvFFN(in_channels=d_model,hidden_channels=d_model*expansion_factor,ks=3,drop=dropout)
             ) for _ in range(depth)]
         )
 

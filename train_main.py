@@ -43,7 +43,7 @@ def train(train_tensor, vali_tensor, model, loss_f,wd, epoches, save_path, logdi
     pre_epoch = 0
     estop_count = 0
     epoch_loss=0.0
-    num_wmp_steps = 100#356
+    num_wmp_steps = 112#356
     warmrestart = False
     # decay_factor = 0.9  # 每次重启时减少的因子
     # initial_lr = 0.001
@@ -74,12 +74,12 @@ def train(train_tensor, vali_tensor, model, loss_f,wd, epoches, save_path, logdi
     
     writer_train = SummaryWriter(log_dir=os.path.join(logdir,'train'),filename_suffix=str(nowwhatturn))
     writer_vali = SummaryWriter(log_dir=os.path.join(logdir,'vali'),filename_suffix=str(nowwhatturn))
-    writer_wegra = SummaryWriter(log_dir=os.path.join(logdir,'weightgrad_'+model_prefix),filename_suffix=str(nowwhatturn))
+    writer_wegra = SummaryWriter(log_dir=os.path.join(logdir,'wg_'+model_prefix))
     # writer_we = SummaryWriter(log_dir=os.path.join(logdir,'weight'),filename_suffix=str(nowwhatturn))
-    train_iou = JaccardIndex(num_classes=2, task="binary",ignore_index=-1).to(device)
-    val_iou = JaccardIndex(num_classes=2, task="binary",ignore_index=-1).to(device)
+    train_iou = JaccardIndex(num_classes=2, task="binary",ignore_index=-123).to(device)
+    val_iou = JaccardIndex(num_classes=2, task="binary",ignore_index=-123).to(device)
     # bat_iou = JaccardIndex(num_classes=2, task="binary").to(device)
-    scheduler_rlr = lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.8, patience=5, verbose=False) #5个epoch验证一次loss没少就减少还是不太行，可以试试factor0.1以下
+    scheduler_rlr = lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5, verbose=False) #5个epoch验证一次loss没少就减少还是不太行，可以试试factor0.1以下
     scheduler_wmu = lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda step: cosine_warmup_lambda(step, num_warmup_steps=num_wmp_steps))
     # scheduler_cosrest = lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=20, T_mult=2, eta_min=1e-4)
     # 设置最大学习率是增大10倍初值的余弦退火(10倍爆了，改3倍)
@@ -87,7 +87,7 @@ def train(train_tensor, vali_tensor, model, loss_f,wd, epoches, save_path, logdi
     # scheduler_cosan.base_lrs = [initial_lr*3 for _ in scheduler_cosan.base_lrs]
     if contin:
         # path = 'G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/save_model/torch/s2filtn3_epoch380-valoss0.018.pth'
-        checkpoint = torch.load(path,map_location=device)
+        checkpoint = torch.load(path,map_location=device,weights_only=True)
         model.to(device)
         # 恢复模型和优化器状态
         model.load_state_dict(checkpoint['model_state_dict'])
@@ -100,10 +100,12 @@ def train(train_tensor, vali_tensor, model, loss_f,wd, epoches, save_path, logdi
         pre_epoch = start_epoch
         loss = checkpoint['loss']
         pre_mvloss = 0.047
+        pre_iou = 0.9
     else: 
         model.to(device)
         start_epoch = -1
         pre_mvloss = 0.1
+        pre_iou = 0.6
     model.train()
     
     onetime=False
@@ -153,7 +155,7 @@ def train(train_tensor, vali_tensor, model, loss_f,wd, epoches, save_path, logdi
         #     #     # 更新调度器的 base_lrs
         #         scheduler_cosrest.base_lrs = [initial_lr for _ in scheduler_cosrest.base_lrs]
 
-        #     # 杰哥说过拟合时增大可能更有用
+        #     # 杰哥说过拟合时增大可能更有用，实际没啥用
 
         #     scheduler_cosrest.step()
         # if warmrestart:
@@ -167,7 +169,7 @@ def train(train_tensor, vali_tensor, model, loss_f,wd, epoches, save_path, logdi
         writer_train.add_scalar('loss', epoch_loss, epoch)
         
         # if last_loss!=0 and (epoch_loss-last_loss)/last_loss>=50:
-        if epoch %8 == 0:
+        if epoch %11 == 0:
             print("writting model weight parameters and gradient ...")
             for name, params in model.named_parameters():
                 writer_wegra.add_histogram(name + '_data', params.clone().cpu().data.numpy(), epoch)
@@ -209,7 +211,8 @@ def train(train_tensor, vali_tensor, model, loss_f,wd, epoches, save_path, logdi
                 mvloss = epoch_loss / (batch_index+1)
 
                 # lr_3 = optimizer.param_groups[0]['lr']
-                scheduler_rlr.step(mvloss)
+                # scheduler_rlr.step(mvloss)
+                scheduler_rlr.step(val_iou_value)
                 # rlr = optimizer.param_groups[0]['lr']
                 # if rlr != lr_3:
                 #     print(f"Learning rate changed from {lr_3} to {rlr} due to validation loss plateau.")
@@ -228,9 +231,11 @@ def train(train_tensor, vali_tensor, model, loss_f,wd, epoches, save_path, logdi
                 # # writer_vali.add_pr_curve(f'PR_curve_epoch_{epoch}', tv_label, all_preds, global_step=epoch)
                 # writer_vali.add_pr_curve(f'PR_curve', tv_label, all_preds, global_step=epoch)
                 
-                if mvloss <= pre_mvloss:
-                    print(f"now loss :{mvloss:>7f} better than previous best epoch{pre_epoch:>3d}:{pre_mvloss:>7f} ")
-                    model_name = model_prefix+f'_epoch{epoch:03d}-valoss{mvloss:.3f}.pth'
+                # if mvloss <= pre_mvloss:
+                if val_iou_value >= pre_iou:
+                    # print(f"now loss :{mvloss:>7f} better than previous best epoch{pre_epoch:>3d}:{pre_mvloss:>7f} ")
+                    print(f"now IoU :{val_iou_value:>7f} better than previous best epoch{pre_epoch:>3d}:{pre_iou:>7f} ")
+                    model_name = model_prefix+f'_epoch{epoch:03d}-valoss{mvloss:.3f}-IoU{val_iou_value:.3f}.pth'
                     # torch.save(model, os.path.join(save_path, model_name))
                     torch.save({
                             'epoch': epoch,
@@ -238,19 +243,19 @@ def train(train_tensor, vali_tensor, model, loss_f,wd, epoches, save_path, logdi
                             'optimizer_state_dict': optimizer.state_dict(),
                             'loss': loss,
                         }, os.path.join(save_path, model_name))
-                    pre_mvloss = mvloss
+                    # pre_mvloss = mvloss
+                    pre_iou = val_iou_value
                     pre_epoch = epoch
                     estop_count=0
                 else:
                     estop_count+=1
                     # if estop_count==10 and not warmrestart: warmrestart=True
-                    if mvloss-pre_mvloss/pre_mvloss>=2  and not onetime:
+                    if (mvloss-pre_mvloss)/pre_mvloss>=20  and not onetime:
                         onetime = True
                         torch.save({
                             'model_state_dict':model.state_dict(),
-                            'optimizer_state_dict': optimizer.state_dict(),
-                        },os.path.join(save_path, 'f{epoch:03d}_badstate.pth'))
-                    if estop_count==30:
+                            'optimizer_state_dict': optimizer.state_dict()}, os.path.join(save_path, f'{epoch:03d}_badstate.pth'))
+                    if estop_count==50:
                         break
     torch.save(model, os.path.join(save_path, model_prefix+'_final_epoch'+ f'{epoch:04d}'+'.pth'))
     return
@@ -336,18 +341,18 @@ class Combine_loss(nn.Module):
     def __init__(self, device, cew = [2.0, 8.0]):
         super(Combine_loss,self).__init__()
         self.cew = torch.tensor(cew).to(device)
-        # self.diceloss = DiceLoss()
+        self.diceloss = DiceLoss()
         self.bceloss = nn.CrossEntropyLoss(weight=self.cew)
         self.focloss = focal_loss(alpha=0.25,gamma=1)
         # self.lova = lovasz_softmax()
     def forward(self,pred,tar):
-        # dice = self.diceloss(pred, tar)
+        dice = self.diceloss(pred, tar)
         bce = self.bceloss(pred, tar)
-        foc = self.focloss(pred, tar)
+        # foc = self.focloss(pred, tar)
         # lova = self.lova(pred, tar)
-        lova = lovasz_softmax(pred, tar)
+        # lova = lovasz_softmax(pred, tar)
         # return (dice+bce+foc)/3
-        return (bce+lova)/2
+        return (4*bce+dice)/5
 
 if __name__ == '__main__':
         
@@ -365,17 +370,37 @@ if __name__ == '__main__':
     datar = h5py.File(data_path, 'r')
     data = datar['data'][:].transpose(0,3,1,2)
     label = datar['label_b'][:]
-    train_data = torch.from_numpy(data).float()
-    train_label = torch.from_numpy(label).long()
-    train_tensor = TensorDataset(train_data,train_label)
-    train_tensor = DataLoader(train_tensor, batch_size=Batch_Size,shuffle=True)
+    train_data1 = torch.from_numpy(data).float()
+    train_label1 = torch.from_numpy(label).long()
+
+    data_path = r'G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/data_mat/bina_sicu2fk.mat'
+    datar = h5py.File(data_path, 'r')
+    data = datar['data'][:].transpose(0,3,1,2)
+    label = datar['label_b'][:]
+    train_data2 = torch.from_numpy(data).float()
+    train_label2 = torch.from_numpy(label).long()
+
+    train_data = torch.cat([train_data1,train_data2]).float()
+    train_label = torch.cat([train_label1,train_data2]).long()
+
+    # train_tensor = TensorDataset(train_data2,train_label2)
+    # train_tensor = DataLoader(train_tensor, batch_size=Batch_Size,shuffle=True)
 
     test_path = r'G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/data_mat/test_sicufk.mat'
     testr = h5py.File(test_path, 'r')
     td = testr['data'][:].transpose(0,3,1,2)
     tl = testr['label_b'][:]
-    test_data = torch.from_numpy(td).float()
-    test_label = torch.from_numpy(tl).long()
+    test_data1 = torch.from_numpy(td).float()
+    test_label1 = torch.from_numpy(tl).long()
+    test_path = r'G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/data_mat/test_sicu2fk.mat'
+    testr = h5py.File(test_path, 'r')
+    td = testr['data'][:].transpose(0,3,1,2)
+    tl = testr['label_b'][:]
+    test_data2 = torch.from_numpy(td).float()
+    test_label2 = torch.from_numpy(tl).long()
+
+    test_data = torch.cat([test_data1,test_data2]).float()
+    test_label = torch.cat([test_label1,test_label2]).long()
     test_tensor = TensorDataset(test_data,test_label)
     test_tensor = DataLoader(test_tensor, batch_size=Batch_Size)
 
@@ -427,8 +452,8 @@ if __name__ == '__main__':
     # path = 'G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/save_model/torch/s2filtn3_epoch380-valoss0.018.pth'
    
      #(weight=we_loss)
-    # loss_fn = Combine_loss(device=device)
-    loss_fn = nn.CrossEntropyLoss()
+    loss_fn = Combine_loss(device=device)
+    #loss_fn = nn.CrossEntropyLoss(weight=torch.tensor([1.0,11.0]).to(device))
     # optimizer = torch.optim.Adam(model.parameters())
     # total_params = 0
     
@@ -440,11 +465,11 @@ if __name__ == '__main__':
     # loss = checkpoint.get('loss', 0.0)
     
     
-    save_path = 'G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/save_model'
-    logdir = 'G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/output/logdep25'
-    dropt = 0.5
-    wd = 1e-2
-    il = 1e-3
+    save_path = 'G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/save_model_2fk'
+    logdir = 'G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/output/resnew_2fk'
+    dropt = 0.6
+    wd = 1e-4
+    il = 1e-4
     # for param in model.parameters():
     #     num_params = param.numel()
     #     total_params += num_params
@@ -457,23 +482,24 @@ if __name__ == '__main__':
     #       epoches=1000,
     #       save_path=save_path, logdir=logdir,
     #       device=device,model_prefix='s2filtn3_8k', path = 'G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/save_model/torch/s2filtn3_epoch410-valoss0.017.pth', contin=False)
-    base_model = 's2dep25noLN'+'dp'+f"{dropt:.1f}"
-    loss = 'bc0'
+    base_model = 'addLNbacks2dep1017'+'dp'+f"{dropt:.1f}"
+    BS='BS'+f"{Batch_Size:03d}"
+    loss = 'cb'
     weight_decay = 'wd'+f"{wd:.0e}"
-    initial_lr = 'inlr+reduce'+f"{il:.0e}"
+    initial_lr = 'inlr-reduce'+f"{il:.0e}"
     d = 'data'+f'{data.shape[0]/1000:.0f}k'
-    model_prefix = '_'.join((base_model,loss,'Adamw',weight_decay,initial_lr,d))
+    model_prefix = '_'.join((BS,base_model,loss,'Adamw',weight_decay,initial_lr,d))
     # 把convffn block的LNRES取消了
 
 
-    model = S2MLPv2(in_channels=20,d_model=[384,768],depth=[2,5],drop=dropt) 
+    model = S2MLPv2(in_channels=20,d_model=[384,768],depth=[10,17],drop=dropt) 
     summary(model, input_size=(Batch_Size, 20, 20, 20))
     train(train_tensor=train_tensor, vali_tensor=test_tensor,
           model=model, loss_f=loss_fn,
-          epoches=600,wd=wd,
+          epoches=1000,wd=wd,initial_lr=il,
           save_path=save_path, logdir=logdir,
           device=device,model_prefix=model_prefix, 
-          path = 'G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/save_model/s2dep1014dp0.0_bc0_wd0e+00_inlr+reduce1e-03_data5k_epoch055-valoss0.047.pth', 
+          path = r'G:/Zheng_caizhi/Pycharmprojects/IC_inverseimage/save_model/s2dep1014dp0.0_bc0_wd0e+00_inlr+reduce1e-03_data5k_epoch055-valoss0.047.pth', 
           contin=False,
           nowwhatturn=model_prefix)
     
